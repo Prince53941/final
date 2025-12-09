@@ -1,282 +1,363 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 import io
 
+import numpy as np
+import pandas as pd
+import streamlit as st
+import matplotlib.pyplot as plt
+import seaborn as sns
+
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import (
-    classification_report,
-    confusion_matrix,
-    roc_auc_score,
-    roc_curve
-)
-from sklearn.ensemble import IsolationForest, RandomForestClassifier
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.linear_model import LogisticRegression
-from xgboost import XGBClassifier
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    classification_report,
+)
 
-# ------------------------------------
-# CONFIG
-# ------------------------------------
-TARGET_COLUMN = "Class"
-RANDOM_STATE = 42
-TEST_SIZE = 0.2
-
+# --------------------------------------------------
+# BASIC CONFIG
+# --------------------------------------------------
 st.set_page_config(
-    page_title="Credit Card Fraud Detection System",
+    page_title="Mutual Fund Risk Classification",
     layout="wide"
 )
 
-st.title("💳 Credit Card Fraud Detection System")
+st.title("📊 Machine Learning for Mutual Fund Risk Classification")
+st.write(
+    """
+    This app replicates your notebook as an interactive dashboard:
+    - Cleans and preprocesses the mutual fund dataset  
+    - Performs EDA  
+    - Trains a Logistic Regression model  
+    - Lets you **predict risk level** for new inputs  
+    """
+)
 
-# ------------------------------------
-# LOAD SAMPLE DATA
-# ------------------------------------
-def load_sample_data():
-    np.random.seed(42)
-    n_samples = 2000
-    fraud_ratio = 0.015
-    n_fraud = int(n_samples * fraud_ratio)
-    n_normal = n_samples - n_fraud
+# --------------------------------------------------
+# DATA LOADING & PREPROCESSING
+# --------------------------------------------------
 
-    V_cols = {f"V{i}": np.random.normal(0, 1, n_samples) for i in range(1, 29)}
-    amounts = np.abs(np.random.normal(50, 40, n_samples)).round(2)
-    labels = np.array([0] * n_normal + [1] * n_fraud)
-    np.random.shuffle(labels)
+@st.cache_data
+def load_default_data():
+    """
+    Try to load the default CSV from the repo.
+    If not found, return None (user can upload).
+    """
+    try:
+        df = pd.read_csv("Mutual_fund Data.csv")
+        return df
+    except FileNotFoundError:
+        return None
 
-    df = pd.DataFrame(V_cols)
-    df["Amount"] = amounts
-    df["Class"] = labels
+
+def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    # 1. AUM cleaning: create AUM_in_cr as in notebook
+    if "AUM" in df.columns:
+        df["AUM_in_cr"] = df["AUM"].astype(str).str.lower()
+        df["AUM_in_cr"] = df["AUM_in_cr"].str.replace(" cr", "", regex=False).str.replace(",", "", regex=False)
+        df["AUM_in_cr"] = df["AUM_in_cr"].str.replace("lakh", "0.01", regex=False).str.replace("k", "", regex=False)
+        df["AUM_in_cr"] = pd.to_numeric(df["AUM_in_cr"], errors="coerce")
+        df["AUM_in_cr"] = df["AUM_in_cr"].fillna(0)
+
+    # 2. Return columns cleaning
+    return_cols = ["1 month return", "1 Year return", "3 Year Return"]
+    for col in return_cols:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False)
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    # 3. Strip text columns
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].astype(str).str.strip()
+
     return df
 
-# ------------------------------------
-# FIXED EDA FUNCTION (works now)
-# ------------------------------------
-def eda_basic(df: pd.DataFrame):
-    st.subheader("📊 Exploratory Data Analysis")
+
+def get_feature_target(df: pd.DataFrame):
+    """
+    Prepare X, y, label encoder and scaler based on your notebook logic.
+    """
+    feature_cols = [
+        "Morning star rating",
+        "Value Research rating",
+        "1 month return",
+        "1 Year return",
+        "3 Year Return",
+        "AUM_in_cr",
+    ]
+    target_col = "Risk"
+
+    # Ensure required columns exist
+    missing = [c for c in feature_cols + [target_col] if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in dataset: {missing}")
+
+    X = df[feature_cols].copy()
+    y = df[target_col].copy()
+
+    # Encode labels
+    label_encoder = LabelEncoder()
+    y_encoded = label_encoder.fit_transform(y)
+
+    # Scale features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    return X, X_scaled, y, y_encoded, feature_cols, target_col, label_encoder, scaler
+
+
+# --------------------------------------------------
+# SIDEBAR: DATA SOURCE
+# --------------------------------------------------
+st.sidebar.header("📂 Data Source")
+
+data_option = st.sidebar.radio(
+    "Choose dataset",
+    ("Use default CSV in repo", "Upload your own CSV")
+)
+
+df = None
+
+if data_option == "Use default CSV in repo":
+    df = load_default_data()
+    if df is None:
+        st.warning("Default file 'Mutual_fund Data.csv' not found. Please upload a CSV from sidebar.")
+else:
+    uploaded_file = st.sidebar.file_uploader("Upload mutual fund CSV", type=["csv"])
+    if uploaded_file is not None:
+        df = pd.read_csv(uploaded_file)
+
+if df is None:
+    st.stop()
+
+# Preprocess
+df = preprocess_data(df)
+
+# --------------------------------------------------
+# TABS LAYOUT
+# --------------------------------------------------
+tab_eda, tab_model, tab_predict = st.tabs(["🔍 EDA", "🤖 Model Training", "🎯 Predict Risk"])
+
+# --------------------------------------------------
+# TAB 1: EDA
+# --------------------------------------------------
+with tab_eda:
+    st.subheader("Dataset Preview")
+    st.dataframe(df.head())
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.write("### Dataset Preview")
-        st.dataframe(df.head())
-
-    with col2:
         st.write("### Dataset Info")
         buffer = io.StringIO()
         df.info(buf=buffer)
         info_str = buffer.getvalue()
         st.text(info_str)
 
+    with col2:
+        st.write("### Summary Statistics")
+        st.dataframe(df.describe(include="all").transpose())
+
     st.write("### Missing Values")
-    st.write(df.isnull().sum())
+    st.dataframe(df.isnull().sum())
 
-    st.write("### Summary Statistics")
-    st.write(df.describe())
+    # Plots
+    st.write("### Risk Level Distribution")
+    if "Risk" in df.columns:
+        fig, ax = plt.subplots()
+        sns.countplot(x="Risk", data=df, ax=ax)
+        ax.set_title("Distribution of Risk Categories")
+        plt.xticks(rotation=45)
+        st.pyplot(fig)
 
-    st.write("### Class Distribution")
-    st.write(df[TARGET_COLUMN].value_counts())
-
-    # Charts
-    fig, ax = plt.subplots()
-    sns.countplot(x=TARGET_COLUMN, data=df, ax=ax)
-    ax.set_title("Class Distribution")
-    st.pyplot(fig)
-
-    if "Amount" in df.columns:
+    if "Category" in df.columns and "AUM_in_cr" in df.columns:
+        st.write("### AUM by Fund Category (Bar Chart)")
+        aum_by_cat = df.groupby("Category")["AUM_in_cr"].sum().reset_index()
         fig2, ax2 = plt.subplots()
-        sns.boxplot(x=TARGET_COLUMN, y="Amount", data=df, ax=ax2)
-        ax2.set_title("Amount vs Class")
+        sns.barplot(x="Category", y="AUM_in_cr", data=aum_by_cat, ax=ax2)
+        ax2.set_title("Total AUM (in crores) by Category")
+        ax2.tick_params(axis="x", rotation=45)
         st.pyplot(fig2)
 
-# ------------------------------------
-# PREPARE FEATURES
-# ------------------------------------
-def prepare_features(df: pd.DataFrame):
-    X = df.drop(columns=[TARGET_COLUMN])
-    y = df[TARGET_COLUMN]
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y,
-        test_size=TEST_SIZE,
-        stratify=y,
-        random_state=RANDOM_STATE
-    )
-
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-
-    return X_train, X_test, y_train, y_test, X_train_scaled, X_test_scaled, scaler
-
-# ------------------------------------
-# ISOLATION FOREST
-# ------------------------------------
-def run_isolation_forest(X_train_scaled, X_test_scaled, y_test):
-    st.subheader("Outlier Detection: Isolation Forest")
-    iso = IsolationForest(
-        n_estimators=100,
-        contamination=0.01,
-        random_state=42
-    )
-    iso.fit(X_train_scaled)
-
-    y_pred = iso.predict(X_test_scaled)
-    y_pred = np.where(y_pred == -1, 1, 0)
-
-    st.write("### Classification Report")
-    st.dataframe(pd.DataFrame(classification_report(y_test, y_pred, output_dict=True)))
-
-    cm = confusion_matrix(y_test, y_pred)
-    fig, ax = plt.subplots()
-    sns.heatmap(cm, annot=True, cmap="Blues", fmt="d", ax=ax)
-    st.pyplot(fig)
-
-# ------------------------------------
-# SUPERVISED ML MODELS
-# ------------------------------------
-def train_logistic_regression(X_train_scaled, X_test_scaled, y_train, y_test):
-    st.subheader("Logistic Regression")
-    lr = LogisticRegression(max_iter=500, class_weight="balanced")
-    lr.fit(X_train_scaled, y_train)
-    y_pred = lr.predict(X_test_scaled)
-    y_prob = lr.predict_proba(X_test_scaled)[:, 1]
-
-    st.dataframe(pd.DataFrame(classification_report(y_test, y_pred, output_dict=True)))
-
-    auc = roc_auc_score(y_test, y_prob)
-    st.write("ROC-AUC:", auc)
-
-    return lr, y_prob
-
-def train_random_forest(X_train, X_test, y_train, y_test):
-    st.subheader("Random Forest")
-    rf = RandomForestClassifier(n_estimators=200, class_weight="balanced")
-    rf.fit(X_train, y_train)
-    y_pred = rf.predict(X_test)
-    y_prob = rf.predict_proba(X_test)[:, 1]
-
-    st.dataframe(pd.DataFrame(classification_report(y_test, y_pred, output_dict=True)))
-
-    auc = roc_auc_score(y_test, y_prob)
-    st.write("ROC-AUC:", auc)
-
-    return rf, y_prob
-
-def train_xgboost(X_train, X_test, y_train, y_test):
-    st.subheader("XGBoost")
-    xgb = XGBClassifier(
-        n_estimators=250,
-        learning_rate=0.05,
-        max_depth=4,
-        eval_metric="logloss",
-        scale_pos_weight=10
-    )
-    xgb.fit(X_train, y_train)
-
-    y_pred = xgb.predict(X_test)
-    y_prob = xgb.predict_proba(X_test)[:, 1]
-
-    st.dataframe(pd.DataFrame(classification_report(y_test, y_pred, output_dict=True)))
-
-    auc = roc_auc_score(y_test, y_prob)
-    st.write("ROC-AUC:", auc)
-
-    return xgb, y_prob
-
-# ------------------------------------
-# ROC PLOT
-# ------------------------------------
-def plot_roc(y_test, model_probs):
-    st.subheader("ROC Curve Comparison")
-    fig, ax = plt.subplots()
-
-    for label, probs in model_probs.items():
-        fpr, tpr, _ = roc_curve(y_test, probs)
-        ax.plot(fpr, tpr, label=label)
-
-    ax.plot([0, 1], [0, 1], linestyle="--")
-    ax.legend()
-    st.pyplot(fig)
-
-# ------------------------------------
-# REAL-TIME PREDICTION
-# ------------------------------------
-def predict_single(model, scaler, sample_dict, feature_columns, scaled=True):
-    df_sample = pd.DataFrame([sample_dict])[feature_columns]
-    if scaled:
-        df_sample = scaler.transform(df_sample)
-    prob = model.predict_proba(df_sample)[:, 1][0]
-    return prob
-
-# ------------------------------------
-# SIDEBAR
-# ------------------------------------
-st.sidebar.header("Dataset Options")
-
-choice = st.sidebar.radio(
-    "Select Data Source",
-    ["Use sample synthetic data", "Upload CSV"]
-)
-
-if choice == "Upload CSV":
-    uploaded = st.sidebar.file_uploader("Upload CSV", type=["csv"])
-    if uploaded:
-        df = pd.read_csv(uploaded)
-    else:
-        st.stop()
-else:
-    df = load_sample_data()
-
-# ------------------------------------
-# MAIN APP WORKFLOW
-# ------------------------------------
-st.header("1️⃣ Data Exploration")
-eda_basic(df)
-
-st.header("2️⃣ Prepare Features")
-X_train, X_test, y_train, y_test, X_train_scaled, X_test_scaled, scaler = prepare_features(df)
-
-st.header("3️⃣ Outlier Detection")
-if st.button("Run Isolation Forest"):
-    run_isolation_forest(X_train_scaled, X_test_scaled, y_test)
-
-st.header("4️⃣ Train ML Models")
-model_option = st.selectbox("Choose Model", ["Logistic Regression", "Random Forest", "XGBoost"])
-
-if st.button("Train Model"):
-    if model_option == "Logistic Regression":
-        model, y_prob = train_logistic_regression(X_train_scaled, X_test_scaled, y_train, y_test)
-        scaled = True
-    elif model_option == "Random Forest":
-        model, y_prob = train_random_forest(X_train, X_test, y_train, y_test)
-        scaled = False
-    else:
-        model, y_prob = train_xgboost(X_train, X_test, y_train, y_test)
-        scaled = False
-
-    st.session_state["model"] = model
-    st.session_state["scaled"] = scaled
-    st.success("Model trained successfully!")
-
-st.header("5️⃣ Real-Time Transaction Prediction")
-
-if "model" in st.session_state:
-    idx = st.number_input("Pick sample index", 0, len(X_test) - 1, 0)
-    sample_dict = pd.DataFrame(X_test).iloc[idx].to_dict()
-
-    if st.button("Predict Fraud Probability"):
-        prob = predict_single(
-            model=st.session_state["model"],
-            scaler=scaler,
-            sample_dict=sample_dict,
-            feature_columns=list(df.drop(columns=["Class"]).columns),
-            scaled=st.session_state["scaled"]
+    if "AMC" in df.columns and "NAV" in df.columns:
+        st.write("### Average NAV by AMC (Top 15)")
+        avg_nav_by_amc = (
+            df.groupby("AMC")["NAV"]
+            .mean()
+            .sort_values(ascending=False)
+            .head(15)
+            .reset_index()
         )
-        st.write("Fraud Probability:", prob)
-        if prob > 0.5:
-            st.error("⚠️ Fraudulent Transaction")
-        else:
-            st.success("✅ Normal Transaction")
+        fig3, ax3 = plt.subplots(figsize=(10, 5))
+        ax3.plot(avg_nav_by_amc["AMC"], avg_nav_by_amc["NAV"], marker="o")
+        ax3.set_title("Average NAV by AMC (Top 15)")
+        ax3.set_xlabel("AMC")
+        ax3.set_ylabel("Average NAV")
+        plt.xticks(rotation=45, ha="right")
+        ax3.grid(True, linestyle="--", alpha=0.5)
+        st.pyplot(fig3)
+
+# --------------------------------------------------
+# TAB 2: MODEL TRAINING
+# --------------------------------------------------
+with tab_model:
+    st.subheader("Model: Logistic Regression (from your notebook)")
+
+    try:
+        X, X_scaled, y, y_encoded, feature_cols, target_col, label_encoder, scaler = get_feature_target(df)
+    except ValueError as e:
+        st.error(str(e))
+        st.stop()
+
+    test_size = st.slider("Test size (fraction)", 0.1, 0.5, 0.3, 0.05)
+
+    if st.button("Train Logistic Regression Model"):
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_scaled, y_encoded, test_size=test_size, random_state=42
+        )
+
+        model = LogisticRegression(max_iter=5000)
+        model.fit(X_train, y_train)
+
+        y_pred = model.predict(X_test)
+
+        accuracy = accuracy_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred, average="weighted", zero_division=0)
+        recall = recall_score(y_test, y_pred, average="weighted", zero_division=0)
+        f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+
+        st.write("### Model Performance Metrics")
+        st.write(f"**Accuracy:** {accuracy:.2f}")
+        st.write(f"**Precision:** {precision:.2f}")
+        st.write(f"**Recall:** {recall:.2f}")
+        st.write(f"**F1 Score:** {f1:.2f}")
+
+        st.write("### Detailed Classification Report")
+        report_df = pd.DataFrame(
+            classification_report(
+                y_test,
+                y_pred,
+                target_names=label_encoder.classes_,
+                output_dict=True,
+                zero_division=0,
+            )
+        ).transpose()
+        st.dataframe(report_df)
+
+        st.write("### Confusion Matrix")
+        cm = confusion_matrix(y_test, y_pred)
+        fig_cm, ax_cm = plt.subplots()
+        sns.heatmap(
+            cm,
+            annot=True,
+            fmt="d",
+            cmap="Blues",
+            xticklabels=label_encoder.classes_,
+            yticklabels=label_encoder.classes_,
+            ax=ax_cm,
+        )
+        ax_cm.set_xlabel("Predicted")
+        ax_cm.set_ylabel("Actual")
+        ax_cm.set_title("Confusion Matrix")
+        st.pyplot(fig_cm)
+
+        # Save in session for prediction tab
+        st.session_state["model"] = model
+        st.session_state["scaler"] = scaler
+        st.session_state["feature_cols"] = feature_cols
+        st.session_state["label_encoder"] = label_encoder
+
+        st.success("Model trained and stored for prediction tab ✅")
+
+# --------------------------------------------------
+# TAB 3: PREDICTION
+# --------------------------------------------------
+with tab_predict:
+    st.subheader("Predict Risk Level for a New Mutual Fund Scheme")
+
+    if "model" not in st.session_state:
+        st.info("Train the model in the **Model Training** tab first.")
+    else:
+        model = st.session_state["model"]
+        scaler = st.session_state["scaler"]
+        feature_cols = st.session_state["feature_cols"]
+        label_encoder = st.session_state["label_encoder"]
+
+        # Use ranges from data to guide user inputs
+        X_current = df[feature_cols]
+
+        col_left, col_right = st.columns(2)
+        inputs = {}
+
+        with col_left:
+            min_mstar = float(X_current["Morning star rating"].min())
+            max_mstar = float(X_current["Morning star rating"].max())
+            inputs["Morning star rating"] = st.slider(
+                "Morning star rating",
+                min_value=min_mstar,
+                max_value=max_mstar,
+                value=float(X_current["Morning star rating"].median()),
+                step=0.5,
+            )
+
+            min_vr = float(X_current["Value Research rating"].min())
+            max_vr = float(X_current["Value Research rating"].max())
+            inputs["Value Research rating"] = st.slider(
+                "Value Research rating",
+                min_value=min_vr,
+                max_value=max_vr,
+                value=float(X_current["Value Research rating"].median()),
+                step=0.5,
+            )
+
+            min_1m = float(X_current["1 month return"].min())
+            max_1m = float(X_current["1 month return"].max())
+            inputs["1 month return"] = st.slider(
+                "1 month return (%)",
+                min_value=min_1m,
+                max_value=max_1m,
+                value=float(X_current["1 month return"].median()),
+            )
+
+        with col_right:
+            min_1y = float(X_current["1 Year return"].min())
+            max_1y = float(X_current["1 Year return"].max())
+            inputs["1 Year return"] = st.slider(
+                "1 Year return (%)",
+                min_value=min_1y,
+                max_value=max_1y,
+                value=float(X_current["1 Year return"].median()),
+            )
+
+            min_3y = float(X_current["3 Year Return"].min())
+            max_3y = float(X_current["3 Year Return"].max())
+            inputs["3 Year Return"] = st.slider(
+                "3 Year Return (%)",
+                min_value=min_3y,
+                max_value=max_3y,
+                value=float(X_current["3 Year Return"].median()),
+            )
+
+            min_aum = float(X_current["AUM_in_cr"].min())
+            max_aum = float(X_current["AUM_in_cr"].max())
+            inputs["AUM_in_cr"] = st.slider(
+                "AUM (in crores)",
+                min_value=min_aum,
+                max_value=max_aum,
+                value=float(X_current["AUM_in_cr"].median()),
+            )
+
+        if st.button("Predict Risk"):
+            sample_df = pd.DataFrame([inputs])[feature_cols]
+            sample_scaled = scaler.transform(sample_df)
+            pred_encoded = model.predict(sample_scaled)[0]
+            pred_label = label_encoder.inverse_transform([pred_encoded])[0]
+
+            st.write("### Predicted Risk Category")
+            st.success(f"🔮 The model predicts: **{pred_label}**")
